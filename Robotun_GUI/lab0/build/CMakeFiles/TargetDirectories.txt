@@ -1,0 +1,6 @@
+E:/Robot/robotun2/Robotun_GUI/lab0/build/CMakeFiles/lab0.dir
+E:/Robot/robotun2/Robotun_GUI/lab0/build/CMakeFiles/ALL_BUILD.dir
+E:/Robot/robotun2/Robotun_GUI/lab0/build/CMakeFiles/ZERO_CHECK.dir
+E:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/glfw-build/CMakeFiles/ALL_BUILD.dir
+E:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/glfw-build/src/CMakeFiles/update_mappings.dir
+E:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/glfw-build/src/CMakeFiles/glfw.dir

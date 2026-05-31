@@ -1,0 +1,10 @@
+^E:\ROBOT\ROBOTUN2\ROBOTUN_GUI\LAB0\BUILD\CMAKEFILES\CF5BFF096E391A9245CB0732FBEF1E63\GENERATE.STAMP.RULE
+setlocal
+D:\cmake\bin\cmake.exe -SE:/Robot/robotun2/Robotun_GUI/lab0 -BE:/Robot/robotun2/Robotun_GUI/lab0/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file E:/Robot/robotun2/Robotun_GUI/lab0/build/lab0.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

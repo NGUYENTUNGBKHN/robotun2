@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"E:/Robot/robotun2/Robotun_GUI/lab0/build/cmake_install.cmake",
+		"E:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/glfw-build/cmake_install.cmake",
+		"E:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/glfw-build/src/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\Robot\robotun2\Robotun_GUI\lab0\build\CMakeFiles\787555f9e6bea58c9bcc18be7f1aa387\update_mappings.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="E:\Robot\robotun2\Robotun_GUI\lab0\build\_deps\glfw-src\src\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="E:\Robot\robotun2\Robotun_GUI\lab0\build\_deps\glfw-src\src\mappings.h.in">
+      <Filter>Header Files</Filter>
+    </None>
+    <None Include="E:\Robot\robotun2\Robotun_GUI\lab0\build\_deps\glfw-src\CMake\GenerateMappings.cmake" />
+    <None Include="E:\Robot\robotun2\Robotun_GUI\lab0\build\_deps\glfw-build\src\CMakeFiles\update_mappings" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{DD1FE94A-46B4-3DB7-B46B-5E46316AAD3A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{3978978A-5C21-3A94-8539-5A98E17B4483}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

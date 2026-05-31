@@ -1,0 +1,10 @@
+^E:\ROBOT\ROBOTUN2\ROBOTUN_GUI\LAB0\BUILD\_DEPS\IMGUI-SUBBUILD\CMAKEFILES\B9C0BC2C0AAB3752F2FED6CB065BE616\GENERATE.STAMP.RULE
+setlocal
+D:\cmake\bin\cmake.exe -SE:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/imgui-subbuild -BE:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/imgui-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file E:/Robot/robotun2/Robotun_GUI/lab0/build/_deps/imgui-subbuild/imgui-populate.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
