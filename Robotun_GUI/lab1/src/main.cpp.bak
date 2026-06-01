@@ -1,0 +1,832 @@
+#pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#include <stdio.h>
+#define GL_SILENCE_DEPRECATION
+#if defined(IMGUI_IMPL_OPENGL_ES2)
+#include <GLES2/gl2.h>
+#endif
+#include <GLFW/glfw3.h> // Will drag system OpenGL headers
+
+#include <vector>
+#include <cmath>
+#include <string>
+#include <algorithm>
+
+// Define Pi locally to be perfectly robust
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static void glfw_error_callback(int error, const char* description)
+{
+    fprintf(stderr, "Glfw Error %d: %s\n", error, description);
+}
+
+// ----------------- PHYSICS MODEL DEFS -----------------
+
+struct State {
+    double dth;   // Angular velocity of pendulum (rad/s)
+    double th;    // Pendulum angle (rad, 0 is vertical upright)
+    double dphi;  // Angular velocity of wheel (rad/s)
+    double phi;   // Wheel rotation angle (rad)
+};
+
+struct Params {
+    double M = 1.5;     // Wheel mass (kg)
+    double R = 0.3;     // Wheel radius (m)
+    double m = 0.5;     // Pendulum mass (kg)
+    double l = 0.8;     // Distance from wheel center to pendulum COM (m)
+    double g = 9.81;    // Gravity (m/s^2)
+    double cw = 0.1;    // Wheel damping coefficient
+    double cp = 0.05;   // Pendulum joint damping coefficient
+};
+
+struct Vec3 {
+    double x, y, z;
+};
+
+struct Camera3D {
+    double yaw = -M_PI / 4.0; 
+    double pitch = M_PI / 6.0; 
+    double distance = 4.0;    
+    Vec3 target = { 0.0, 0.5, 0.0 };
+};
+
+ImVec2 project3d(const Vec3& p, const Camera3D& cam, ImVec2 center, double scale_zoom) {
+    double rx = p.x - cam.target.x;
+    double ry = p.y - cam.target.y;
+    double rz = p.z - cam.target.z;
+
+    // 1. Rotate Y (yaw)
+    double x1 = rx * cos(cam.yaw) - rz * sin(cam.yaw);
+    double z1 = rx * sin(cam.yaw) + rz * cos(cam.yaw);
+
+    // 2. Rotate X (pitch)
+    double y2 = ry * cos(cam.pitch) - z1 * sin(cam.pitch);
+    double z2 = ry * sin(cam.pitch) + z1 * cos(cam.pitch);
+
+    // Distance relative to camera
+    double dist = cam.distance - z2;
+    if (dist < 0.1) dist = 0.1;
+
+    float sx = (float)(center.x + (x1 * scale_zoom) / dist);
+    float sy = (float)(center.y - (y2 * scale_zoom) / dist);
+    return ImVec2(sx, sy);
+}
+
+enum class IntegratorType {
+    Euler,
+    RK4
+};
+
+// Compute dynamic derivatives of the system (Lagrangian equations of motion)
+State get_derivatives(const State& state, const Params& p) {
+    double th = state.th;
+    double dth = state.dth;
+    double dphi = state.dphi;
+    double dx = dphi * p.R; // Wheel linear velocity
+
+    // Effective wheel mass (including rotation, assuming disk: Me = M + I/R^2 = 1.5*M)
+    double Me = 1.5 * p.M;
+    
+    // Pendulum moment of inertia about center of mass (assuming a thin rod of length 2*l)
+    double Ip = (1.0 / 12.0) * p.m * (4.0 * p.l * p.l); 
+    double Jp = Ip + p.m * p.l * p.l; // Parallel axis theorem
+
+    // Formulate system of equations:
+    // A * ddx + B * ddth = C
+    // D * ddx + E * ddth = F
+    double A = Me + p.m;
+    double B = p.m * p.l * cos(th);
+    double C = p.m * p.l * dth * dth * sin(th) - p.cw * dx / p.R;
+    
+    double D = p.m * p.l * cos(th);
+    double E = Jp;
+    double F = p.m * p.g * p.l * sin(th) - p.cp * dth;
+
+    double det = A * E - B * D;
+    if (std::abs(det) < 1e-9) det = 1e-9;
+
+    double ddx = (C * E - B * F) / det;
+    double ddth = (A * F - C * D) / det;
+    double ddphi = ddx / p.R;
+
+    State deriv;
+    deriv.dth = ddth;
+    deriv.th = dth;
+    deriv.dphi = ddphi;
+    deriv.phi = dphi;
+    return deriv;
+}
+
+// Numerical Euler integration
+State integrate_euler(const State& s, const Params& p, double dt) {
+    State deriv = get_derivatives(s, p);
+    State next;
+    next.dth = s.dth + deriv.dth * dt;
+    next.th = s.th + deriv.th * dt;
+    next.dphi = s.dphi + deriv.dphi * dt;
+    next.phi = s.phi + deriv.phi * dt;
+    return next;
+}
+
+// Numerical Runge-Kutta 4th Order integration
+State integrate_rk4(const State& s, const Params& p, double dt) {
+    State k1 = get_derivatives(s, p);
+
+    State s2;
+    s2.dth = s.dth + k1.dth * dt * 0.5;
+    s2.th = s.th + k1.th * dt * 0.5;
+    s2.dphi = s.dphi + k1.dphi * dt * 0.5;
+    s2.phi = s.phi + k1.phi * dt * 0.5;
+    State k2 = get_derivatives(s2, p);
+
+    State s3;
+    s3.dth = s.dth + k2.dth * dt * 0.5;
+    s3.th = s.th + k2.th * dt * 0.5;
+    s3.dphi = s.dphi + k2.dphi * dt * 0.5;
+    s3.phi = s.phi + k2.phi * dt * 0.5;
+    State k3 = get_derivatives(s3, p);
+
+    State s4;
+    s4.dth = s.dth + k3.dth * dt;
+    s4.th = s.th + k3.th * dt;
+    s4.dphi = s.dphi + k3.dphi * dt;
+    s4.phi = s.phi + k3.phi * dt;
+    State k4 = get_derivatives(s4, p);
+
+    State next;
+    next.dth = s.dth + (k1.dth + 2.0 * k2.dth + 2.0 * k3.dth + k4.dth) * dt / 6.0;
+    next.th = s.th + (k1.th + 2.0 * k2.th + 2.0 * k3.th + k4.th) * dt / 6.0;
+    next.dphi = s.dphi + (k1.dphi + 2.0 * k2.dphi + 2.0 * k3.dphi + k4.dphi) * dt / 6.0;
+    next.phi = s.phi + (k1.phi + 2.0 * k2.phi + 2.0 * k3.phi + k4.phi) * dt / 6.0;
+    return next;
+}
+
+// History logging structure for real-time graphs
+struct SimHistory {
+    std::vector<float> time;
+    std::vector<float> theta;
+    std::vector<float> dth;
+    std::vector<float> phi;
+    size_t max_size = 1000;
+
+    void add(float t, float th, float dt, float ph) {
+        if (time.size() >= max_size) {
+            time.erase(time.begin());
+            theta.erase(theta.begin());
+            dth.erase(dth.begin());
+            phi.erase(phi.begin());
+        }
+        time.push_back(t);
+        theta.push_back(th);
+        dth.push_back(dt);
+        phi.push_back(ph);
+    }
+
+    void clear() {
+        time.clear();
+        theta.clear();
+        dth.clear();
+        phi.clear();
+    }
+};
+
+// Apply highly polished modern dark theme with orange-red accents
+void ApplyPremiumStyle() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 8.0f;
+    style.FrameRounding = 6.0f;
+    style.PopupRounding = 6.0f;
+    style.GrabRounding = 6.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.ChildRounding = 6.0f;
+
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text]                   = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
+    colors[ImGuiCol_TextDisabled]           = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+    colors[ImGuiCol_WindowBg]               = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
+    colors[ImGuiCol_ChildBg]                = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+    colors[ImGuiCol_BorderShadow]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_FrameBg]                = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.24f, 0.24f, 0.28f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.35f, 1.00f);
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.15f, 0.15f, 0.18f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    colors[ImGuiCol_TitleBgCollapsed]       = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.14f, 0.14f, 0.17f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.11f, 0.11f, 0.14f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.30f, 0.30f, 0.35f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.50f, 0.50f, 0.55f, 1.00f);
+    colors[ImGuiCol_CheckMark]              = ImVec4(1.00f, 0.43f, 0.15f, 1.00f); 
+    colors[ImGuiCol_SliderGrab]             = ImVec4(1.00f, 0.43f, 0.15f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive]        = ImVec4(1.00f, 0.55f, 0.25f, 1.00f);
+    colors[ImGuiCol_Button]                 = ImVec4(1.00f, 0.43f, 0.15f, 0.80f);
+    colors[ImGuiCol_ButtonHovered]          = ImVec4(1.00f, 0.43f, 0.15f, 1.00f);
+    colors[ImGuiCol_ButtonActive]           = ImVec4(0.85f, 0.33f, 0.08f, 1.00f);
+    colors[ImGuiCol_Header]                 = ImVec4(1.00f, 0.43f, 0.15f, 0.20f);
+    colors[ImGuiCol_HeaderHovered]          = ImVec4(1.00f, 0.43f, 0.15f, 0.40f);
+    colors[ImGuiCol_HeaderActive]           = ImVec4(1.00f, 0.43f, 0.15f, 0.60f);
+    colors[ImGuiCol_Separator]              = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
+    colors[ImGuiCol_SeparatorActive]        = ImVec4(1.00f, 0.43f, 0.15f, 1.00f);
+    colors[ImGuiCol_ResizeGrip]             = ImVec4(1.00f, 0.43f, 0.15f, 0.20f);
+    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(1.00f, 0.43f, 0.15f, 0.60f);
+    colors[ImGuiCol_ResizeGripActive]       = ImVec4(1.00f, 0.43f, 0.15f, 0.90f);
+    colors[ImGuiCol_Tab]                    = ImVec4(0.18f, 0.18f, 0.22f, 0.80f);
+    colors[ImGuiCol_TabHovered]             = ImVec4(1.00f, 0.43f, 0.15f, 0.80f);
+    colors[ImGuiCol_TabActive]              = ImVec4(1.00f, 0.43f, 0.15f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.15f, 0.15f, 0.18f, 0.80f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    colors[ImGuiCol_PlotLines]              = ImVec4(1.00f, 0.43f, 0.15f, 1.00f);
+    colors[ImGuiCol_PlotLinesHovered]       = ImVec4(1.00f, 0.55f, 0.25f, 1.00f);
+    colors[ImGuiCol_PlotHistogram]          = ImVec4(1.00f, 0.43f, 0.15f, 1.00f);
+    colors[ImGuiCol_PlotHistogramHovered]   = ImVec4(1.00f, 0.55f, 0.25f, 1.00f);
+    colors[ImGuiCol_TextSelectedBg]         = ImVec4(1.00f, 0.43f, 0.15f, 0.30f);
+}
+
+// Custom vector-based graphing engine using ImDrawList
+void DrawGraph(ImVec2 pos, ImVec2 size, const std::vector<float>& data, const char* label, ImU32 color) {
+    if (data.empty()) return;
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+    // Draw background
+    draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(20, 20, 25, 255), 6.0f);
+    draw_list->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(45, 45, 55, 255), 6.0f);
+
+    // Draw grid
+    int divisions = 6;
+    for (int i = 1; i < divisions; ++i) {
+        float x = pos.x + (size.x / divisions) * i;
+        draw_list->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + size.y), IM_COL32(50, 50, 60, 100), 1.0f);
+        float y = pos.y + (size.y / divisions) * i;
+        draw_list->AddLine(ImVec2(pos.x, y), ImVec2(pos.x + size.x, y), IM_COL32(50, 50, 60, 100), 1.0f);
+    }
+
+    // Find min and max
+    float min_val = data[0];
+    float max_val = data[0];
+    for (float val : data) {
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
+    }
+    float diff = max_val - min_val;
+    if (diff < 0.1f) diff = 0.1f;
+    min_val -= diff * 0.15f;
+    max_val += diff * 0.15f;
+
+    // Draw graph line
+    for (size_t i = 0; i < data.size() - 1; ++i) {
+        float x1 = pos.x + (size.x / (data.size() - 1)) * i;
+        float y1 = pos.y + size.y - (size.y * (data[i] - min_val) / (max_val - min_val));
+        float x2 = pos.x + (size.x / (data.size() - 1)) * (i + 1);
+        float y2 = pos.y + size.y - (size.y * (data[i + 1] - min_val) / (max_val - min_val));
+        
+        draw_list->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), color, 2.5f);
+    }
+
+    // Print label
+    char text[128];
+    snprintf(text, sizeof(text), "%s (Live: %.3f, Range: [%.2f, %.2f])", label, data.back(), min_val, max_val);
+    draw_list->AddText(ImVec2(pos.x + 8, pos.y + 8), IM_COL32(230, 230, 240, 255), text);
+}
+
+int main()
+{
+    // Initialize GLFW
+    glfwSetErrorCallback(glfw_error_callback);
+    if (!glfwInit())
+        return 1;
+
+    const char* glsl_version = "#version 130";
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+
+    // Create window
+    float main_dpi_scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
+    GLFWwindow* window = glfwCreateWindow((int)(1280 * main_dpi_scale), (int)(720 * main_dpi_scale), "Lab 1: Self-Balancing Robot Physics Simulation", NULL, NULL);
+    if (window == NULL)
+        return 1;
+
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1); // Enable vsync
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+
+    // Apply scaling
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(main_dpi_scale);        
+    style.FontScaleDpi = main_dpi_scale;        
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init(glsl_version);
+
+    // Apply Slate / Copper modern design system
+    ApplyPremiumStyle();
+
+    // --- SIMULATION INITIAL STATE & STATE VARS ---
+    Params params;
+    State state = { 0.0, M_PI / 4.0, 0.0, 0.0 }; // dth, th, dphi, phi
+
+    bool paused = true;
+    float sim_speed = 1.0f;
+    double physics_dt = 0.002;
+    double accumulator = 0.0;
+    double sim_time = 0.0;
+    
+    IntegratorType integrator = IntegratorType::RK4;
+    SimHistory history;
+
+    bool track_wheel = true;
+    double zoom = 200.0; // Pixels per meter
+
+    // --- 3D CAMERA & MODE ---
+    Camera3D cam;
+    bool enable_3d = true;
+
+    float init_theta_deg = 45.0f; // 45 degrees default starting angle
+
+    auto reset_sim = [&]() {
+        state.dth = 0.0;
+        state.th = init_theta_deg * M_PI / 180.0;
+        state.dphi = 0.0;
+        state.phi = 0.0;
+        sim_time = 0.0;
+        accumulator = 0.0;
+        history.clear();
+    };
+    reset_sim();
+
+    ImVec4 clear_color = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+
+    while(!glfwWindowShouldClose(window))
+    {
+        glfwPollEvents();
+        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED))
+            continue;
+
+        // --- KEYBOARD SHORTCUTS ---
+        if (!io.WantCaptureKeyboard) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Space)) {
+                paused = !paused;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+                reset_sim();
+            }
+        }
+
+        // --- PHYSICS UPDATE (ACCUMULATOR METHOD) ---
+        if (!paused) {
+            double dt_adjusted = io.DeltaTime * sim_speed;
+            if (dt_adjusted > 0.1) dt_adjusted = 0.1; // Limit dt to avoid numerical freeze spiral
+
+            accumulator += dt_adjusted;
+            while (accumulator >= physics_dt) {
+                if (integrator == IntegratorType::RK4) {
+                    state = integrate_rk4(state, params, physics_dt);
+                } else {
+                    state = integrate_euler(state, params, physics_dt);
+                }
+                sim_time += physics_dt;
+                accumulator -= physics_dt;
+            }
+            // Record state history
+            history.add((float)sim_time, (float)state.th, (float)state.dth, (float)state.phi);
+        }
+
+        // --- RENDER INTERFACE ---
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        // Create a full-client-area dashboard viewport
+        int display_w, display_h;
+        glfwGetFramebufferSize(window, &display_w, &display_h);
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2((float)display_w, (float)display_h));
+        
+        ImGui::Begin("Dashboard", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar);
+
+        double current_wheel_x = state.phi * params.R;
+
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("Simulation")) {
+                if (ImGui::MenuItem("Play/Pause", "Space")) { paused = !paused; }
+                if (ImGui::MenuItem("Reset", "R")) { reset_sim(); }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+
+        // Two-column layout: Controls (Left) & Canvas/Plots (Right)
+        if (ImGui::BeginTable("MainColumnsTable", 2, ImGuiTableFlags_Resizable)) {
+            ImGui::TableSetupColumn("ControlsColumn", ImGuiTableColumnFlags_WidthFixed, 340.0f * main_dpi_scale);
+            ImGui::TableSetupColumn("CanvasColumn", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableNextRow();
+
+            // --- COLUMN 0: CONTROLS & PARAMS ---
+            ImGui::TableSetColumnIndex(0);
+            ImGui::BeginChild("ControlsPanel", ImVec2(0, 0), true);
+        ImGui::TextColored(ImVec4(1.00f, 0.43f, 0.15f, 1.00f), "CONTROLS & SETTINGS");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (paused) {
+            if (ImGui::Button("PLAY", ImVec2(90, 30))) paused = false;
+        } else {
+            if (ImGui::Button("PAUSE", ImVec2(90, 30))) paused = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("STEP", ImVec2(75, 30))) {
+            if (integrator == IntegratorType::RK4) {
+                state = integrate_rk4(state, params, physics_dt);
+            } else {
+                state = integrate_euler(state, params, physics_dt);
+            }
+            sim_time += physics_dt;
+            history.add((float)sim_time, (float)state.th, (float)state.dth, (float)state.phi);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("RESET", ImVec2(75, 30))) {
+            reset_sim();
+        }
+
+        ImGui::Spacing();
+        ImGui::SliderFloat("Sim Speed", &sim_speed, 0.1f, 5.0f, "%.1fx");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(1.00f, 0.43f, 0.15f, 1.00f), "INITIAL STATE");
+        ImGui::Spacing();
+        
+        if (ImGui::SliderFloat("Init Theta (deg)", &init_theta_deg, -180.0f, 180.0f, "%.1f deg")) {
+            if (paused) {
+                state.th = init_theta_deg * M_PI / 180.0;
+                history.clear();
+            }
+        }
+        if (paused) {
+            ImGui::TextColored(ImVec4(0.40f, 0.80f, 0.40f, 1.00f), "Drag slider to rotate starting pose.");
+        } else {
+            ImGui::TextDisabled("Pause to adjust initial angle.");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(1.00f, 0.43f, 0.15f, 1.00f), "PHYSICAL PARAMETERS");
+        ImGui::Spacing();
+
+        double min_M = 0.1, max_M = 10.0;
+        ImGui::SliderScalar("Wheel Mass M (kg)", ImGuiDataType_Double, &params.M, &min_M, &max_M, "%.2f");
+        
+        double min_R = 0.05, max_R = 1.5;
+        ImGui::SliderScalar("Wheel Radius R (m)", ImGuiDataType_Double, &params.R, &min_R, &max_R, "%.2f");
+
+        double min_m = 0.05, max_m = 10.0;
+        ImGui::SliderScalar("Pend. Mass m (kg)", ImGuiDataType_Double, &params.m, &min_m, &max_m, "%.2f");
+
+        double min_l = 0.1, max_l = 3.0;
+        ImGui::SliderScalar("Pend. Length l (m)", ImGuiDataType_Double, &params.l, &min_l, &max_l, "%.2f");
+
+        double min_g = 0.0, max_g = 25.0;
+        ImGui::SliderScalar("Gravity g (m/s2)", ImGuiDataType_Double, &params.g, &min_g, &max_g, "%.2f");
+        
+        ImGui::Spacing();
+        ImGui::Text("Friction & Joint Damping");
+        double min_cw = 0.0, max_cw = 2.0;
+        ImGui::SliderScalar("Wheel Damping", ImGuiDataType_Double, &params.cw, &min_cw, &max_cw, "%.3f");
+
+        double min_cp = 0.0, max_cp = 1.0;
+        ImGui::SliderScalar("Pend Damping", ImGuiDataType_Double, &params.cp, &min_cp, &max_cp, "%.3f");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(1.00f, 0.43f, 0.15f, 1.00f), "SIMULATOR SETTINGS");
+        ImGui::Spacing();
+
+        const char* integrators[] = { "Euler (Fast)", "RK4 (Accurate)" };
+        int current_int = (int)integrator;
+        if (ImGui::Combo("Integrator", &current_int, integrators, IM_ARRAYSIZE(integrators))) {
+            integrator = (IntegratorType)current_int;
+        }
+
+        ImGui::Checkbox("Track Wheel (Camera)", &track_wheel);
+        ImGui::Checkbox("Enable 3D Mode", &enable_3d);
+        if (enable_3d) {
+            double min_dist = 1.0, max_dist = 15.0;
+            ImGui::SliderScalar("Cam Distance (m)", ImGuiDataType_Double, &cam.distance, &min_dist, &max_dist, "%.1f");
+            ImGui::TextDisabled("Drag Left Mouse on canvas to rotate.");
+            ImGui::TextDisabled("Scroll mouse to zoom in/out.");
+        } else {
+            double min_zoom = 50.0, max_zoom = 500.0;
+            ImGui::SliderScalar("Zoom (px/m)", ImGuiDataType_Double, &zoom, &min_zoom, &max_zoom, "%.0f");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("LIVE telemetry:");
+        if (ImGui::BeginTable("StateTelemetryTable", 2)) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Text("Theta: %.3f rad", state.th);
+            ImGui::Text("       %.1f deg", state.th * 180.0 / M_PI);
+            
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("dTheta: %.3f r/s", state.dth);
+            ImGui::Text("Wheel X: %.3f m", current_wheel_x);
+            ImGui::EndTable();
+        }
+
+        ImGui::EndChild();
+
+            // --- COLUMN 1: CANVAS & PLOTS ---
+            ImGui::TableSetColumnIndex(1);
+            ImVec2 col1_avail = ImGui::GetContentRegionAvail();
+        float canvas_h = col1_avail.y * 0.65f;
+        float plot_h = col1_avail.y - canvas_h - 10.0f;
+
+        // Sub-panel 1: Canvas
+        ImGui::BeginChild("CanvasPanel", ImVec2(col1_avail.x, canvas_h), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+        ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+
+        // Canvas dark background
+        draw_list->AddRectFilled(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), IM_COL32(20, 20, 24, 255));
+        
+        // Setup coordinate center
+        ImVec2 center = ImVec2(canvas_pos.x + canvas_size.x / 2.0f, canvas_pos.y + canvas_size.y * 0.70f); // Ground at 70% height
+        double cam_x = track_wheel ? current_wheel_x : 0.0;
+
+        float mass_draw_r = (float)(0.08 * params.l * zoom);
+        if (mass_draw_r < 12.0f) mass_draw_r = 12.0f;
+        if (mass_draw_r > 40.0f) mass_draw_r = 40.0f;
+
+        if (enable_3d) {
+            // --- 3D INTERACTIVE RENDERING ---
+            // Update camera target
+            cam.target.x = cam_x;
+            cam.target.y = params.R;
+            cam.target.z = 0.0;
+
+            // Handle Camera Orbiting Controls
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 drag_delta = ImGui::GetIO().MouseDelta;
+                cam.yaw += drag_delta.x * 0.005;
+                cam.pitch -= drag_delta.y * 0.005;
+                
+                if (cam.pitch > 1.45) cam.pitch = 1.45;
+                if (cam.pitch < 0.05) cam.pitch = 0.05;
+            }
+            if (ImGui::IsWindowHovered()) {
+                float wheel = ImGui::GetIO().MouseWheel;
+                cam.distance -= wheel * 0.2;
+                if (cam.distance < 1.0) cam.distance = 1.0;
+                if (cam.distance > 15.0) cam.distance = 15.0;
+            }
+
+            // Draw 3D Ground Grid (y = 0)
+            double grid_range_x = 5.0;
+            double grid_range_z = 2.0;
+            double step = 0.5;
+            double scale_3d = zoom * 1.5; // Scale up for 3D perspective
+
+            // Longitudinal lines (parallel to Z)
+            double start_gx = floor((cam_x - grid_range_x) / step) * step;
+            double end_gx = ceil((cam_x + grid_range_x) / step) * step;
+            for (double gx = start_gx; gx <= end_gx; gx += step) {
+                ImVec2 p1 = project3d({gx, 0.0, -grid_range_z}, cam, center, scale_3d);
+                ImVec2 p2 = project3d({gx, 0.0, grid_range_z}, cam, center, scale_3d);
+                draw_list->AddLine(p1, p2, IM_COL32(60, 60, 70, 255), 1.2f);
+                
+                // Draw coordinate label on the central axis
+                if (std::abs(gx - round(gx)) < 1e-5) {
+                    ImVec2 p_lbl = project3d({gx, 0.0, 0.0}, cam, center, scale_3d);
+                    char lbl[16];
+                    snprintf(lbl, sizeof(lbl), "%.0fm", gx);
+                    draw_list->AddText(ImVec2(p_lbl.x - 10.0f, p_lbl.y + 5.0f), IM_COL32(140, 140, 150, 180), lbl);
+                }
+            }
+            // Transverse lines (parallel to X)
+            for (double gz = -grid_range_z; gz <= grid_range_z + 0.01; gz += step) {
+                ImVec2 p1 = project3d({cam_x - grid_range_x, 0.0, gz}, cam, center, scale_3d);
+                ImVec2 p2 = project3d({cam_x + grid_range_x, 0.0, gz}, cam, center, scale_3d);
+                draw_list->AddLine(p1, p2, IM_COL32(60, 60, 70, 255), 1.2f);
+            }
+
+            // Draw 3D Wheel (Cylinder)
+            int circle_segments = 24;
+            double w_half = 0.12; // wheel width half
+            std::vector<ImVec2> left_pts(circle_segments);
+            std::vector<ImVec2> right_pts(circle_segments);
+
+            for (int i = 0; i < circle_segments; ++i) {
+                double angle = i * (2.0 * M_PI / circle_segments);
+                double wx = current_wheel_x + params.R * sin(angle);
+                double wy = params.R + params.R * cos(angle);
+
+                left_pts[i] = project3d({wx, wy, -w_half}, cam, center, scale_3d);
+                right_pts[i] = project3d({wx, wy, w_half}, cam, center, scale_3d);
+            }
+
+            // Draw left & right circle rims
+            draw_list->AddPolyline(left_pts.data(), circle_segments, IM_COL32(180, 180, 200, 255), ImDrawFlags_Closed, 2.0f);
+            draw_list->AddPolyline(right_pts.data(), circle_segments, IM_COL32(180, 180, 200, 255), ImDrawFlags_Closed, 2.0f);
+
+            // Draw connecting lines along cylinder length
+            for (int i = 0; i < circle_segments; i += 3) {
+                draw_list->AddLine(left_pts[i], right_pts[i], IM_COL32(110, 110, 130, 180), 1.2f);
+            }
+
+            // Draw Spokes
+            int num_spokes = 8;
+            for (int j = 0; j < num_spokes; ++j) {
+                double angle = state.phi + j * (2.0 * M_PI / num_spokes);
+                double wx = current_wheel_x + params.R * sin(angle);
+                double wy = params.R + params.R * cos(angle);
+
+                ImVec2 hub_left = project3d({current_wheel_x, params.R, -w_half}, cam, center, scale_3d);
+                ImVec2 rim_left = project3d({wx, wy, -w_half}, cam, center, scale_3d);
+                draw_list->AddLine(hub_left, rim_left, IM_COL32(100, 100, 115, 255), 1.5f);
+
+                ImVec2 hub_right = project3d({current_wheel_x, params.R, w_half}, cam, center, scale_3d);
+                ImVec2 rim_right = project3d({wx, wy, w_half}, cam, center, scale_3d);
+                draw_list->AddLine(hub_right, rim_right, IM_COL32(100, 100, 115, 255), 1.5f);
+            }
+
+            // Hub central axle shaft
+            ImVec2 axle_l = project3d({current_wheel_x, params.R, -w_half - 0.02}, cam, center, scale_3d);
+            ImVec2 axle_r = project3d({current_wheel_x, params.R, w_half + 0.02}, cam, center, scale_3d);
+            draw_list->AddLine(axle_l, axle_r, IM_COL32(240, 110, 50, 255), 3.0f);
+
+            // Wheel spot (red dot in 3D center, at the left rim for visibility)
+            double spot_r = 0.75 * params.R;
+            float spot_x = current_wheel_x + spot_r * sin(state.phi);
+            float spot_y = params.R - spot_r * cos(state.phi);
+            ImVec2 scr_spot = project3d({spot_x, spot_y, -w_half}, cam, center, scale_3d);
+            draw_list->AddCircleFilled(scr_spot, 5.0f, IM_COL32(230, 50, 50, 255));
+
+            // Draw 3D Pendulum Rod & Mass
+            double px_mass = current_wheel_x + params.l * sin(state.th);
+            double py_mass = params.R + params.l * cos(state.th);
+            ImVec2 scr_wheel_center = project3d({current_wheel_x, params.R, 0.0}, cam, center, scale_3d);
+            ImVec2 scr_mass = project3d({px_mass, py_mass, 0.0}, cam, center, scale_3d);
+
+            // Mechanical double line rod
+            draw_list->AddLine(scr_wheel_center, scr_mass, IM_COL32(240, 110, 50, 255), 5.5f);
+            draw_list->AddLine(scr_wheel_center, scr_mass, IM_COL32(50, 50, 50, 255), 2.0f);
+
+            // Shaded 3D Bob Sphere
+            float scale_distance_factor = (float)(scale_3d / (cam.distance - (params.l * cos(state.th) * sin(cam.pitch)))); // approximate z for depth scaling
+            float r3d = (float)(0.08 * params.l * scale_distance_factor);
+            if (r3d < 10.0f) r3d = 10.0f;
+            if (r3d > 50.0f) r3d = 50.0f;
+
+            draw_list->AddCircleFilled(scr_mass, r3d + 6.0f, IM_COL32(230, 50, 50, 40));
+            draw_list->AddCircleFilled(scr_mass, r3d + 3.0f, IM_COL32(230, 50, 50, 90));
+            draw_list->AddCircleFilled(scr_mass, r3d, IM_COL32(230, 50, 50, 255));
+            // Sphere glossy highlight
+            ImVec2 highlight_pos = ImVec2(scr_mass.x - r3d * 0.3f, scr_mass.y - r3d * 0.3f);
+            draw_list->AddCircleFilled(highlight_pos, r3d * 0.3f, IM_COL32(255, 160, 160, 220));
+
+        } else {
+            // --- 2D RENDERING ---
+            auto to_screen = [&](double x_phys, double y_phys) -> ImVec2 {
+                float sx = (float)(center.x + (x_phys - cam_x) * zoom);
+                float sy = (float)(center.y - y_phys * zoom);
+                return ImVec2(sx, sy);
+            };
+
+            // Draw Ground line
+            float ground_y = center.y;
+            draw_list->AddLine(ImVec2(canvas_pos.x, ground_y), ImVec2(canvas_pos.x + canvas_size.x, ground_y), IM_COL32(100, 100, 110, 255), 2.0f);
+            
+            // Draw moving ground coordinates
+            double grid_spacing = 0.5; // meters
+            double half_width = (canvas_size.x / 2.0) / zoom;
+            double start_gx = floor((cam_x - half_width) / grid_spacing) * grid_spacing;
+            double end_gx = ceil((cam_x + half_width) / grid_spacing) * grid_spacing;
+
+            for (double gx = start_gx; gx <= end_gx; gx += grid_spacing) {
+                ImVec2 scr = to_screen(gx, 0.0);
+                draw_list->AddLine(ImVec2(scr.x, ground_y), ImVec2(scr.x, ground_y + 12.0f), IM_COL32(80, 80, 90, 255), 1.5f);
+                
+                char lbl[16];
+                snprintf(lbl, sizeof(lbl), "%.1fm", gx);
+                draw_list->AddText(ImVec2(scr.x - 12.0f, ground_y + 15.0f), IM_COL32(140, 140, 150, 180), lbl);
+            }
+
+            // Draw Wheel
+            ImVec2 scr_wheel = to_screen(current_wheel_x, params.R);
+            float w_radius_pixels = (float)(params.R * zoom);
+            
+            // Solid wheel outer rim
+            draw_list->AddCircle(scr_wheel, w_radius_pixels, IM_COL32(180, 180, 200, 255), 0, 3.0f);
+            draw_list->AddCircleFilled(scr_wheel, w_radius_pixels - 2.0f, IM_COL32(50, 50, 60, 120), 0); // translucent fill
+
+            // Spokes (visualize wheel rolling)
+            int num_spokes = 8;
+            for (int j = 0; j < num_spokes; ++j) {
+                double angle = state.phi + j * (2.0 * M_PI / num_spokes);
+                float sp_x = scr_wheel.x + w_radius_pixels * (float)sin(angle);
+                float sp_y = scr_wheel.y - w_radius_pixels * (float)cos(angle);
+                draw_list->AddLine(scr_wheel, ImVec2(sp_x, sp_y), IM_COL32(110, 110, 125, 255), 1.5f);
+            }
+
+            // Wheel Red spot (matching example.py)
+            double spot_r = 0.7 * params.R;
+            float spot_r_pixels = (float)(spot_r * zoom);
+            float spot_x = scr_wheel.x + spot_r_pixels * (float)sin(state.phi);
+            float spot_y = scr_wheel.y - spot_r_pixels * (float)cos(state.phi);
+            draw_list->AddCircleFilled(ImVec2(spot_x, spot_y), 5.0f, IM_COL32(230, 50, 50, 255));
+
+            // Draw Pendulum Rod and Mass
+            double px_mass = current_wheel_x + params.l * sin(state.th);
+            double py_mass = params.R + params.l * cos(state.th);
+            ImVec2 scr_mass = to_screen(px_mass, py_mass);
+
+            // Double line rod for premium mechanical carbon effect
+            draw_list->AddLine(scr_wheel, scr_mass, IM_COL32(240, 110, 50, 255), 5.5f);
+            draw_list->AddLine(scr_wheel, scr_mass, IM_COL32(50, 50, 50, 255), 2.0f);
+
+            // Pendulum Mass (Crimson glow)
+            draw_list->AddCircleFilled(scr_mass, mass_draw_r + 6.0f, IM_COL32(230, 50, 50, 40));
+            draw_list->AddCircleFilled(scr_mass, mass_draw_r + 3.0f, IM_COL32(230, 50, 50, 90));
+            draw_list->AddCircleFilled(scr_mass, mass_draw_r, IM_COL32(230, 50, 50, 255));
+            draw_list->AddCircleFilled(scr_mass, mass_draw_r - 4.0f, IM_COL32(255, 120, 120, 255));
+        }
+
+        // On-screen overlay text
+        draw_list->AddText(ImVec2(canvas_pos.x + 15, canvas_pos.y + 15), IM_COL32(200, 200, 210, 255), "PHYSICS CANVAS (FREE UNCONTROLLED MOTION)");
+        if (paused) {
+            draw_list->AddText(ImVec2(canvas_pos.x + 15, canvas_pos.y + 35), IM_COL32(230, 150, 50, 255), "[PAUSED] Press SPACE or click PLAY to simulate free fall!");
+        }
+
+        ImGui::EndChild();
+
+        // Sub-panel 2: Plots
+        ImGui::BeginChild("PlotsPanel", ImVec2(col1_avail.x, plot_h), true);
+        
+        ImVec2 plot_size = ImGui::GetContentRegionAvail();
+        float single_plot_w = (plot_size.x - 15.0f) / 2.0f;
+        float single_plot_h = plot_size.y - 5.0f;
+
+        ImVec2 plot1_pos = ImGui::GetCursorScreenPos();
+        DrawGraph(plot1_pos, ImVec2(single_plot_w, single_plot_h), 
+                  history.theta.empty() ? std::vector<float>{0.0f} : history.theta, 
+                  "Pendulum Angle (theta, rad)", IM_COL32(255, 110, 40, 255));
+        
+        ImGui::SetCursorScreenPos(ImVec2(plot1_pos.x + single_plot_w + 10.0f, plot1_pos.y));
+        DrawGraph(ImGui::GetCursorScreenPos(), ImVec2(single_plot_w, single_plot_h), 
+                  history.dth.empty() ? std::vector<float>{0.0f} : history.dth, 
+                  "Angular Velocity (dtheta, rad/s)", IM_COL32(40, 170, 255, 255));
+
+        // Submit a dummy item to grow the window boundaries and satisfy the ImGui check!
+        ImGui::Dummy(ImVec2(plot_size.x, plot_size.y));
+
+        ImGui::EndChild();
+
+            ImGui::EndTable();
+        }
+        ImGui::End();
+
+        // Render Frame
+        ImGui::Render();
+        glfwGetFramebufferSize(window, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(window);
+    }
+
+    // Cleanup backends & context
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    
+    return 0;
+}
