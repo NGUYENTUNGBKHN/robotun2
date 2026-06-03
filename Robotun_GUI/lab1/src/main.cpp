@@ -14,39 +14,13 @@
 #include <string>
 #include <algorithm>
 
-// Define Pi locally to be perfectly robust
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include "free-fall.h"
 
 // Error callback to capture and print GLFW issues
 static void glfw_error_callback(int error, const char* description)
 {
     fprintf(stderr, "Glfw Error %d: %s\n", error, description);
 }
-
-// ============================================================================
-// --- STEP 2.1: PHYSICS MODEL DEFINITIONS ---
-// ============================================================================
-
-// State vector holding the dynamic coordinates of the system
-struct State {
-    double dth;   // Angular velocity of the pendulum (rad/s)
-    double th;    // Pendulum angle (rad, 0 is the vertical upright position)
-    double dphi;  // Angular velocity of the rolling wheel (rad/s)
-    double phi;   // Wheel rotation angle (rad)
-};
-
-// Physical parameters of the self-balancing system
-struct Params {
-    double M = 1.5;     // Wheel mass (kg)
-    double R = 0.3;     // Wheel radius (m)
-    double m = 0.5;     // Pendulum mass (kg)
-    double l = 0.8;     // Distance from wheel center to pendulum Center of Mass (m)
-    double g = 9.81;    // Gravity acceleration (m/s^2)
-    double cw = 0.1;    // Wheel damping/friction coefficient
-    double cp = 0.05;   // Pendulum joint damping/friction coefficient
-};
 
 // Selection of numerical integration solver
 enum class IntegratorType {
@@ -149,8 +123,8 @@ int main()
     ApplyPremiumStyle();
 
     // --- STEP 2.3: SIMULATION INITIAL STATE & PARAMETERS VARIABLES ---
-    Params params;
-    State state = { 0.0, M_PI / 4.0, 0.0, 0.0 }; // Initial pose: th = 45 degrees (M_PI/4)
+    FreeFallParams params;
+    FreeFallState state = { 0.0, PI / 4.0, 0.0, 0.0 }; // Initial pose: th = 45 degrees (M_PI/4)
 
     bool paused = true;
     float sim_speed = 1.0f;
@@ -163,7 +137,7 @@ int main()
     // Dummy reset lambda function (to be fully integrated with physics later)
     auto reset_sim = [&]() {
         state.dth = 0.0;
-        state.th = init_theta_deg * M_PI / 180.0;
+        state.th = init_theta_deg * PI / 180.0;
         state.dphi = 0.0;
         state.phi = 0.0;
     };
@@ -187,10 +161,14 @@ int main()
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2((float)display_w, (float)display_h));
         
-        ImGui::Begin("Dashboard", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar);
+        ImGui::Begin("Dashboard", nullptr, ImGuiWindowFlags_NoTitleBar | 
+                                            ImGuiWindowFlags_NoResize | 
+                                            ImGuiWindowFlags_NoMove | 
+                                            ImGuiWindowFlags_NoCollapse | 
+                                            ImGuiWindowFlags_MenuBar);
 
         // Pre-calculate physical values for layout scopes
-        double current_wheel_x = state.phi * params.R;
+        //double current_wheel_x = state.phi * params.R;
 
         // Dashboard Menu Bar
         if (ImGui::BeginMenuBar()) {
@@ -201,7 +179,7 @@ int main()
             }
             ImGui::EndMenuBar();
         }
-
+        #if 0
         // --- STEP 2.5: MODERN 2-COLUMN TABLE LAYOUT ---
         if (ImGui::BeginTable("MainColumnsTable", 2, ImGuiTableFlags_Resizable)) {
             // Setup static controls column and expandable canvas/plots column
@@ -355,6 +333,7 @@ int main()
 
             ImGui::EndTable();
         }
+        #endif 
         ImGui::End();
 
         // --- STEP 1.5: SYSTEM RENDERING PIPELINE ---

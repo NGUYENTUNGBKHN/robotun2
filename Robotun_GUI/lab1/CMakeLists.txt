@@ -46,6 +46,7 @@ set(IMGUI_SOURCES
 # Define the Executable
 add_executable(lab1
     src/main.cpp
+    src/free-fall.cpp
     ${IMGUI_SOURCES}
 )
 
