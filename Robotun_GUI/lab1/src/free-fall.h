@@ -23,13 +23,13 @@ struct FreeFallState {
 };
 
 struct FreeFallParams {
-    double M;     // Wheel mass (kg)
-    double R;     // Wheel radius (m)
-    double m;     // Pendulum mass (kg)
-    double l;     // Distance from wheel center to pendulum Center of Mass (m)
-    double g;     // Gravity acceleration (m/s^2)
-    double cw;    // Wheel damping/friction coefficient
-    double cp;    // Pendulum joint damping/friction coefficient
+    double M = 1.5;     // Wheel mass (kg)
+    double R = 0.3;     // Wheel radius (m)
+    double m = 0.5;     // Pendulum mass (kg)
+    double l = 0.8;     // Distance from wheel center to pendulum COM (m)
+    double g = 9.81;    // Gravity (m/s^2)
+    double cw = 0.1;    // Wheel damping coefficient
+    double cp = 0.05;   // Pendulum joint damping coefficient
 };
 
 
